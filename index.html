@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Scuffed Bloodborne (Web)</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+  <!-- Pause / Help Overlay -->
+  <div id="overlay" class="hidden">
+    <div class="menu">
+      <h1>Scuffed Bloodborne</h1>
+      <button id="resumeBtn">Resume</button>
+      <button id="helpBtn">Help / Tutorial</button>
+      <button id="quitBtn">Quit</button>
+      <div id="helpSection" class="hidden">
+        <p>Controls: WASD – Move | J – Attack | K – Dodge | ESC – Pause</p>
+        <a href="https://youtu.be/your_tutorial_video_here" target="_blank">
+          Watch the Tutorial Video
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>
