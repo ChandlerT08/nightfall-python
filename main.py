@@ -1,20 +1,16 @@
-# scuffed_bloodborne_phase2_sprites_animated.py
-# Phase 2: Smooth camera (lerp), A* pathfinding for enemies, enemy telegraph+attack animations.
-# Integrated: Structured map generator + Zoomed camera (1.5x)
-# Uses heavy metal pixel art pack if available; falls back to original placeholders.
-# Requires pygame: pip install pygame
+# Full game file (merged): original game systems + NPC interaction (press E) with bottom dialogue box fade
 
 import pygame, sys, math, random, heapq, os
 from collections import deque
 
 pygame.init()
 WIDTH, HEIGHT = 800, 600
-ZOOM = 1.5  # <<-- zoom factor requested
+ZOOM = 1.5  # zoom factor used for rendering
 VIEW_W = int(WIDTH / ZOOM)
 VIEW_H = int(HEIGHT / ZOOM)
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Scuffed Bloodborne - Phase 2 (Camera, A*, Enemy Attacks) - Animated (Zoomed)")
+pygame.display.set_caption("Scuffed Bloodborne - Phase 2 (Camera, A*, Enemy Attacks) - NPCs")
 clock = pygame.time.Clock()
 FONT = pygame.font.SysFont("monospace", 18)
 
@@ -33,8 +29,8 @@ BTN_HOVER = (120, 30, 30)
 
 # ---------- Map settings ----------
 TILE_SIZE = 40
-MAP_TILES_X = 60   # larger map (2400 px)
-MAP_TILES_Y = 48   # (1920 px)
+MAP_TILES_X = 60
+MAP_TILES_Y = 48
 
 # ---------- Utility: asset loader with fallbacks ----------
 ASSET_BASES = [
@@ -66,22 +62,16 @@ def load_image(rel_path):
         return None
 
 def slice_sheet_to_frames(rel_path, frame_w=None, frame_h=None, scale=None):
-    """
-    Robust sprite-sheet slicer. (unchanged)
-    """
     p = find_asset(rel_path)
     if not p:
         return []
-
     try:
         sheet = pygame.image.load(p).convert_alpha()
     except Exception as ex:
         print(f"Failed to load sheet '{p}': {ex}")
         return []
-
     sheet_w, sheet_h = sheet.get_size()
 
-    # If both frame_w and frame_h provided and divide evenly -> grid slicing
     if frame_w and frame_h and sheet_w % frame_w == 0 and sheet_h % frame_h == 0:
         frames = []
         cols = sheet_w // frame_w
@@ -95,7 +85,6 @@ def slice_sheet_to_frames(rel_path, frame_w=None, frame_h=None, scale=None):
                 frames.append(frame)
         return frames
 
-    # Otherwise attempt single-row auto-detect (vertical separators)
     alpha_arr = []
     for x in range(sheet_w):
         col_transparent = True
@@ -118,7 +107,6 @@ def slice_sheet_to_frames(rel_path, frame_w=None, frame_h=None, scale=None):
             w = span_end - span_start + 1
             rect = pygame.Rect(span_start, 0, w, sheet_h)
             frame = sheet.subsurface(rect).copy()
-            # Trim top/bottom transparent rows if present
             top_trim = 0
             bottom_trim = sheet_h - 1
             for yy in range(sheet_h):
@@ -187,9 +175,7 @@ def slice_sheet_to_frames(rel_path, frame_w=None, frame_h=None, scale=None):
         frames = [frame]
 
     frames = [f for f in frames if f.get_width() > 2 and f.get_height() > 2]
-
     return frames
-
 
 # ---------- Preferred asset relative paths ----------
 P_PLAYER_SHEET = os.path.join("_CHAR", "heroes", "fernando", "fernando.png")
@@ -228,52 +214,36 @@ print(" slash_fx  :", "FOUND" if slash_fx_img else "MISSING -> placeholder FX us
 
 # ---------- Map generation (structured) ----------
 def generate_map():
-    # Start filled with walls
     grid = [["W" for _ in range(MAP_TILES_X)] for _ in range(MAP_TILES_Y)]
-
-    # Carve the outer boundary as walls (already walls)
-    # Carve a main horizontal street (wide)
     mid_y = MAP_TILES_Y // 2
     for x in range(2, MAP_TILES_X - 2):
         for y in range(mid_y - 2, mid_y + 3):
             grid[y][x] = "."
-
-    # Carve several vertical connecting streets (like alleys)
     for x in range(6, MAP_TILES_X - 6, 12):
-        # create a vertical corridor with some randomness
         top = 3
         bottom = MAP_TILES_Y - 4
         for y in range(top, bottom):
             if random.random() < 0.85:
                 grid[y][x] = "."
-        # carve a thicker entrance near the main street
         for dy in range(-2, 3):
             if 0 <= mid_y + dy < MAP_TILES_Y:
                 grid[mid_y + dy][x] = "."
-
-    # Central plaza
     cx, cy = MAP_TILES_X // 2, MAP_TILES_Y // 2
     for yy in range(cy - 6, cy + 7):
         for xx in range(cx - 8, cx + 9):
             if 0 <= xx < MAP_TILES_X and 0 <= yy < MAP_TILES_Y:
                 grid[yy][xx] = "."
-
-    # Add a number of side rooms and alleys
     for _ in range(10):
         rw = random.randint(3, 7)
         rh = random.randint(3, 6)
         rx = random.randint(3, MAP_TILES_X - rw - 3)
         ry = random.randint(3, MAP_TILES_Y - rh - 3)
-        # make it more likely to connect to an existing '.' tile by carving a corridor
         for y in range(ry, ry+rh):
             for x in range(rx, rx+rw):
                 if random.random() < 0.95:
                     grid[y][x] = "."
-        # carve a connecting corridor toward center
         if random.random() < 0.9:
-            # simple straight connector
             if random.random() < 0.5:
-                # horizontal connector
                 sx = rx + rw // 2
                 for x in range(min(sx, cx), max(sx, cx)+1):
                     for dy in range(-1,2):
@@ -287,15 +257,12 @@ def generate_map():
                         xx = rx + rw//2 + dx
                         if 0 <= xx < MAP_TILES_X:
                             grid[y][xx] = "."
-
-    # Ensure border rows/cols remain walls
     for x in range(MAP_TILES_X):
         grid[0][x] = "W"
         grid[MAP_TILES_Y-1][x] = "W"
     for y in range(MAP_TILES_Y):
         grid[y][0] = "W"
         grid[y][MAP_TILES_X-1] = "W"
-
     return grid
 
 WORLD = generate_map()
@@ -317,11 +284,10 @@ player = {
     "dodge_timer": 0,
     "invincible": 0,
     "afterimages": deque(maxlen=6),
-    # animation state
     "anim_state": "idle",
     "anim_index": 0,
     "anim_timer": 0.0,
-    "anim_frame_rate": 0.08,  # seconds per frame
+    "anim_frame_rate": 0.08,
 }
 
 # ---------- spawn points ----------
@@ -348,27 +314,23 @@ def create_enemy(x, y):
         "sink": 0.0,
         "death_timer": 0,
         "respawn_timer": 0,
-        # Pathfinding fields:
-        "path": [],             # list of tile (tx,ty) waypoints
+        "path": [],
         "path_index": 0,
-        "pf_cooldown": 0,       # frames until next pathfinding allowed
+        "pf_cooldown": 0,
         "pf_request": False,
-        # Combat / attack states:
-        "state": "idle",        # idle, chase, telegraph, attack, cooldown, dead
+        "state": "idle",
         "state_timer": 0,
         "attack_cooldown": 0,
-        "telegraph_len": 26,    # frames of telegraph
-        "attack_len": 12,       # frames of attack (damage applied mid)
+        "telegraph_len": 26,
+        "attack_len": 12,
         "cooldown_len": 40,
         "last_player_tile": None,
-        # animation
         "anim_state": "idle",
         "anim_index": 0,
         "anim_timer": 0.0,
         "anim_frame_rate": 0.12
     }
 
-# Create initial enemies
 enemies = [create_enemy(*spawn_points[i]) for i in range(min(12, len(spawn_points)))]
 
 # ---------- FX ----------
@@ -376,24 +338,19 @@ screen_flash = 0
 sparks = []
 
 # ---------- Camera (smooth lerp) ----------
-# Camera top-left coordinates are in world pixel units.
 camera_x = player["x"] - VIEW_W / 2
 camera_y = player["y"] - VIEW_H / 2
 
 def update_camera():
     global camera_x, camera_y
-    # target center is player's position, but taking into account the zoomed viewport size
     target_x = player["x"] - VIEW_W / 2
     target_y = player["y"] - VIEW_H / 2
-    # clamp to bounds using VIEW_W/VIEW_H (not screen size)
     target_x = max(0, min(WORLD_W - VIEW_W, target_x))
     target_y = max(0, min(WORLD_H - VIEW_H, target_y))
-    # lerp smoothing
     camera_x += (target_x - camera_x) * 0.12
     camera_y += (target_y - camera_y) * 0.12
 
 def world_to_screen(wx, wy):
-    # returns coordinates relative to the world surface (pre-scale).
     return int(wx - camera_x), int(wy - camera_y)
 
 # ---------- Collision ----------
@@ -426,7 +383,6 @@ def heuristic(a, b):
     return abs(a[0]-b[0]) + abs(a[1]-b[1])
 
 def astar(start, goal):
-    # start and goal are tile coords (tx,ty)
     if start == goal:
         return [start]
     open_set = []
@@ -438,7 +394,6 @@ def astar(start, goal):
     while open_set:
         _, current = heapq.heappop(open_set)
         if current == goal:
-            # reconstruct
             path = []
             cur = current
             while cur in came_from:
@@ -457,9 +412,8 @@ def astar(start, goal):
                 gscore[nb] = tentative
                 fscore[nb] = tentative + heuristic(nb, goal)
                 heapq.heappush(open_set, (fscore[nb], nb))
-    return []  # no path
+    return []
 
-# ---------- Utility ----------
 def tile_from_world(x, y):
     return int(x // TILE_SIZE), int(y // TILE_SIZE)
 
@@ -488,7 +442,6 @@ def handle_player_movement(keys):
 def player_dodge_towards_cursor():
     if player["dodge_cooldown"] <= 0 and player["dodge_timer"] <= 0:
         mx, my = pygame.mouse.get_pos()
-        # convert screen mouse into world coordinates considering zoom
         world_mx = (mx / ZOOM) + camera_x
         world_my = (my / ZOOM) + camera_y
         angle = math.atan2(world_my - player["y"], world_mx - player["x"])
@@ -503,7 +456,7 @@ def player_dodge_towards_cursor():
         player["dodge_timer"] = 14
         player["dodge_cooldown"] = 40
 
-# ---------- Enemy behavior (with pathing & attacks) ----------
+# ---------- Enemy behavior ----------
 def enemy_request_path(e):
     e["pf_request"] = True
 
@@ -608,7 +561,6 @@ def update_enemy_ai(e):
             if can_move_entity(e["x"], ny, e["radius"]):
                 e["y"] = ny
 
-    # handle attack state machine timers
     if e["state"] == "telegraph":
         e["state_timer"] -= 1
         if e["state_timer"] <= 0:
@@ -640,7 +592,6 @@ def perform_attack(mouse_pos_screen):
         return
     player["attack_cooldown"] = 32
     player["swipe_timer"] = 10
-    # convert screen mouse into world coordinates considering zoom
     mx = (mouse_pos_screen[0] / ZOOM) + camera_x
     my = (mouse_pos_screen[1] / ZOOM) + camera_y
     px, py = player["x"], player["y"]
@@ -664,11 +615,10 @@ def perform_attack(mouse_pos_screen):
                     e["hp"] = 0
                     e["dead"] = True
                     e["death_timer"] = 30
-                    e["respawn_timer"] = 600  # frames until respawn
+                    e["respawn_timer"] = 600
 
 # ---------- Animation helpers ----------
 def player_choose_anim_state(keys):
-    # attack overrides movement
     if player["swipe_timer"] > 0:
         return "attack"
     moving = keys[pygame.K_w] or keys[pygame.K_s] or keys[pygame.K_a] or keys[pygame.K_d]
@@ -677,15 +627,12 @@ def player_choose_anim_state(keys):
     return "idle"
 
 def tick_player_anim(dt, keys):
-    # Decide desired anim state
     desired = player_choose_anim_state(keys)
     if player["anim_state"] != desired:
         player["anim_state"] = desired
         player["anim_index"] = 0
         player["anim_timer"] = 0.0
-    # Advance frame
     frames = []
-    # determine frames slice based on loaded sheet
     if player_frames_all:
         p = find_asset(P_PLAYER_SHEET)
         if p:
@@ -700,22 +647,18 @@ def tick_player_anim(dt, keys):
         else:
             cols = max(1, len(player_frames_all))
             rows = 1
-        # map rows to animations: row0 idle, row1 run, row2 attack, row3 misc
         if rows >= 4:
             row_map = {"idle":0, "run":1, "attack":2, "misc":3}
             r = row_map.get(player["anim_state"], 0)
             start = r * cols
             frames = player_frames_all[start:start+cols]
         elif rows == 2:
-            # fallback: first row idle, second row run/attack
             if player["anim_state"] == "idle":
                 frames = player_frames_all[0:cols]
             else:
                 frames = player_frames_all[cols:cols*2]
         else:
-            # single row - split into portions: use all frames for all states
             frames = player_frames_all
-    # If none loaded, frames empty -> fallback handled in draw_player
     if frames:
         player["anim_timer"] += dt
         if player["anim_timer"] >= player["anim_frame_rate"]:
@@ -723,7 +666,6 @@ def tick_player_anim(dt, keys):
             player["anim_index"] = (player["anim_index"] + 1) % len(frames)
 
 def tick_enemy_anim(e, dt):
-    # determine frames for this enemy from the sheet
     if not enemy_frames_all:
         return
     p = find_asset(P_ENEMY_SHEET)
@@ -739,10 +681,7 @@ def tick_enemy_anim(e, dt):
     else:
         cols = max(1, len(enemy_frames_all))
         rows = 1
-
-    # e["state"] can be telegraph/attack/cooldown/idle; map these to frames
     if rows >= 2:
-        # assume row 0 idle, row 1 attack
         if e["state"] == "attack":
             start = cols * 1
             frames = enemy_frames_all[start:start+cols]
@@ -750,20 +689,18 @@ def tick_enemy_anim(e, dt):
             frames = enemy_frames_all[0:cols]
     else:
         frames = enemy_frames_all
-
     if not frames:
         return
-
     e["anim_timer"] += dt
     if e["anim_timer"] >= e["anim_frame_rate"]:
         e["anim_timer"] = 0.0
         e["anim_index"] = (e["anim_index"] + 1) % len(frames)
 
-# ---------- Draw helpers (now accept a target surface to draw onto) ----------
+# ---------- Draw helpers ----------
 def draw_world(target_surf):
     left_tile = max(0, int(camera_x // TILE_SIZE) - 1)
     right_tile = min(MAP_TILES_X - 1, int((camera_x + VIEW_W) // TILE_SIZE) + 1)
-    top_tile = max(0, int(camera_y // TILE_SIZE) - 1)
+    top_tile = max(0, int((camera_y // TILE_SIZE) - 1))
     bottom_tile = min(MAP_TILES_Y - 1, int((camera_y + VIEW_H) // TILE_SIZE) + 1)
     for ty in range(top_tile, bottom_tile + 1):
         for tx in range(left_tile, right_tile + 1):
@@ -793,7 +730,6 @@ def draw_afterimages(target_surf):
 
 def draw_player(target_surf, keys):
     sx, sy = world_to_screen(player["x"], player["y"])
-    # animated sprite if available
     frames = []
     if player_frames_all:
         p = find_asset(P_PLAYER_SHEET)
@@ -809,7 +745,6 @@ def draw_player(target_surf, keys):
         else:
             cols = max(1, len(player_frames_all))
             rows = 1
-
         if rows >= 4:
             row_map = {"idle":0, "run":1, "attack":2, "misc":3}
             r = row_map.get(player["anim_state"], 0)
@@ -827,7 +762,6 @@ def draw_player(target_surf, keys):
         idx = player["anim_index"] % len(frames)
         img = frames[idx]
         rect = img.get_rect(center=(sx, sy))
-        # tint when invincible
         if player["invincible"] > 0:
             tmp = img.copy()
             tint = pygame.Surface(tmp.get_size(), pygame.SRCALPHA)
@@ -840,7 +774,6 @@ def draw_player(target_surf, keys):
         body_color = (220, 30, 30) if player["invincible"] <= 0 else (255, 200, 180)
         pygame.draw.circle(target_surf, body_color, (sx, sy), player["radius"])
 
-    # swipe FX
     if player["swipe_timer"] > 0:
         length = player["attack_range"]
         angle = player["attack_angle"]
@@ -872,7 +805,6 @@ def draw_enemies(target_surf, dt):
             pygame.draw.circle(surf, TELEGRAPH_COLOR + (alpha,), (surf.get_width()//2, surf.get_height()//2), e["radius"]*3)
             target_surf.blit(surf, (sx - surf.get_width()//2, sy - surf.get_height()//2))
 
-        # draw enemy sprite frames if available
         frames = []
         if enemy_frames_all:
             p = find_asset(P_ENEMY_SHEET)
@@ -905,7 +837,6 @@ def draw_enemies(target_surf, dt):
         else:
             pygame.draw.circle(target_surf, DARK_GRAY, (sx, sy), e["radius"])
 
-        # HP bar
         if e["hp"] < 50:
             w = int((e["hp"]/50.0) * (e["radius"]*2))
             pygame.draw.rect(target_surf, (80,0,0), (sx - e["radius"], sy - e["radius"] - 8, e["radius"]*2, 5))
@@ -936,7 +867,6 @@ btn_restart_rect = pygame.Rect(WIDTH//2 - BTN_W//2, HEIGHT//2 - 20 - BTN_H - 8, 
 btn_quit_rect = pygame.Rect(WIDTH//2 - BTN_W//2, HEIGHT//2 + 20, BTN_W, BTN_H)
 
 def draw_pause_menu(mouse_pos):
-    # Pause menu should draw on the screen (not the scaled world) to keep UI crisp and sized correctly
     overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     overlay.fill((0,0,0,200))
     screen.blit(overlay, (0,0))
@@ -966,6 +896,144 @@ def restart_full():
     for (sx,sy) in spawn_points[:12]:
         enemies.append(create_enemy(sx, sy))
 
+# ---------- NPC System (added) ----------
+# NPC images are expected in ./npcs/ (travis.png, biden.png, genesis.png)
+class NPC:
+    def __init__(self, name, image_path, x, y, message):
+        img = load_image(image_path)
+        if img:
+            # scale to a reasonable tile-size sprite
+            self.image = pygame.transform.smoothscale(img, (48, 48))
+        else:
+            self.image = pygame.Surface((48, 48), pygame.SRCALPHA)
+            pygame.draw.rect(self.image, (120,120,200), (0,0,48,48))
+        self.name = name
+        self.x = x
+        self.y = y
+        self.message = message
+        self.talking = False
+        self.talk_timer = 0
+
+# instantiate NPCs at positions near center plaza
+npc_paths = {
+    "Travis Scott": os.path.join("npcs", "travis.png"),
+    "Joe Biden": os.path.join("npcs", "biden.png"),
+    "Genesis": os.path.join("npcs", "genesis.png"),
+}
+
+NPCS = []
+# positions chosen relative to center of world (adjust as desired)
+NPCS.append(NPC("Travis Scott", npc_paths["Travis Scott"], WORLD_W//2 + 150, WORLD_H//2 + 0, "fein"))
+NPCS.append(NPC("Joe Biden", npc_paths["Joe Biden"], WORLD_W//2 - 150, WORLD_H//2 + 0, "america"))
+NPCS.append(NPC("Genesis", npc_paths["Genesis"], WORLD_W//2 + 0, WORLD_H//2 - 150, "knock, knock"))
+
+# dialog fade variables
+dialog_alpha = 0.0  # 0..255 used for fade in/out of bottom dialogue
+dialog_alpha_speed = 10.0  # how fast alpha moves per frame (tweakable)
+
+# Add the show_help variable
+show_help = False
+
+# ---------- draw_npcs ----------
+def draw_npcs(target_surf):
+    for npc in NPCS:
+        sx, sy = world_to_screen(npc.x, npc.y)
+        rect = npc.image.get_rect(center=(sx, sy))
+        target_surf.blit(npc.image, rect)
+
+def start_talking_nearest():
+    # find nearest NPC within range and start talking
+    best = None
+    best_d = 999999
+    for npc in NPCS:
+        d = math.hypot(player["x"] - npc.x, player["y"] - npc.y)
+        if d < 70 and d < best_d:
+            best = npc
+            best_d = d
+    if best:
+        best.talking = True
+        best.talk_timer = 180  # ~3 seconds at 60 fps
+
+def stop_talking_if_far():
+    for npc in NPCS:
+        d = math.hypot(player["x"] - npc.x, player["y"] - npc.y)
+        if d >= 90:
+            npc.talking = False
+            npc.talk_timer = 0
+
+def tick_npc_timers():
+    for npc in NPCS:
+        if npc.talking:
+            if npc.talk_timer > 0:
+                npc.talk_timer -= 1
+            else:
+                npc.talking = False
+
+def any_npc_talking():
+    return any(n.talking for n in NPCS)
+
+def draw_dialogue_box():
+    global dialog_alpha
+    # find the first NPC that is talking (if multiple, show the first)
+    talking_npc = next((n for n in NPCS if n.talking), None)
+    target_alpha = 255 if talking_npc else 0
+    # smooth approach
+    if dialog_alpha < target_alpha:
+        dialog_alpha = min(target_alpha, dialog_alpha + dialog_alpha_speed)
+    elif dialog_alpha > target_alpha:
+        dialog_alpha = max(target_alpha, dialog_alpha - dialog_alpha_speed)
+    if dialog_alpha <= 6:
+        return
+    box_h = 96
+    overlay = pygame.Surface((WIDTH, box_h), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, int(180 * (dialog_alpha/255.0))))
+    screen.blit(overlay, (0, HEIGHT - box_h))
+    if talking_npc:
+        name_text = FONT.render(talking_npc.name + ":", True, (255, 255, 180))
+        msg_text = FONT.render(talking_npc.message, True, WHITE)
+        # apply overall alpha to texts by rendering to surface and setting alpha
+        text_surf = pygame.Surface((WIDTH - 60, box_h), pygame.SRCALPHA)
+        text_surf.blit(name_text, (0, 20))
+        text_surf.blit(msg_text, (name_text.get_width() + 10, 20))
+        text_surf.set_alpha(int(dialog_alpha))
+        screen.blit(text_surf, (30, HEIGHT - box_h + 0))
+
+# ---------- Help Screen Drawing ----------
+def draw_help_screen():
+    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 180))
+    screen.blit(overlay, (0, 0))
+    
+    # Title
+    title_text = FONT.render("Help - Controls", True, WHITE)
+    screen.blit(title_text, (WIDTH // 2 - title_text.get_width() // 2, 50))
+    
+    # List controls
+    controls = [
+        "W/A/S/D: Move",
+        "Mouse Left Click: Attack",
+        "E: Talk to NPC",
+        "Shift: Dodge",
+        "Esc: Pause",
+        "H: Toggle Help"
+    ]
+    for i, ctrl in enumerate(controls):
+        txt = FONT.render(ctrl, True, WHITE)
+        screen.blit(txt, (100, 100 + i * 30))
+    
+    # Button to watch video
+    button_rect = pygame.Rect(WIDTH//2 - 100, HEIGHT - 100, 200, 44)
+    mouse_x, mouse_y = pygame.mouse.get_pos()
+    if button_rect.collidepoint(mouse_x, mouse_y):
+        pygame.draw.rect(screen, BTN_HOVER, button_rect, border_radius=8)
+    else:
+        pygame.draw.rect(screen, BTN_BG, button_rect, border_radius=8)
+    
+    button_text = FONT.render("Watch How to Play", True, WHITE)
+    screen.blit(button_text, (button_rect.centerx - button_text.get_width() // 2, button_rect.centery - button_text.get_height() // 2))
+    
+    return button_rect
+
 # ---------- Main Loop ----------
 paused = False
 running = True
@@ -975,7 +1043,7 @@ if len(enemies) == 0:
 
 while running:
     ms = clock.tick(60)
-    dt = ms / 1000.0  # seconds
+    dt = ms / 1000.0
     mouse_pos = pygame.mouse.get_pos()
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -988,20 +1056,35 @@ while running:
             elif event.key in (pygame.K_LSHIFT, pygame.K_RSHIFT):
                 if not paused and player["dodge_cooldown"] <= 0:
                     player_dodge_towards_cursor()
+            elif event.key == pygame.K_e:
+                # E pressed: try to start talking to nearest NPC if close
+                if not paused:
+                    start_talking_nearest()
+            elif event.key == pygame.K_h:
+                show_help = not show_help  # Toggle help screen
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1:
-                if paused:
+                if show_help:
+                    # Check if click on the button
+                    if button_rect.collidepoint(event.pos):
+                        import webbrowser
+                        webbrowser.open("https://drive.google.com/file/d/1LqB9d_72G97QB4cmkfGqXh__8SUoEffE/view?usp=sharing")
+                elif paused:
                     if btn_restart_rect.collidepoint(mouse_pos):
-                        restart_full(); paused = False
+                        restart_full()
+                        paused = False
                     elif btn_quit_rect.collidepoint(mouse_pos):
-                        pygame.quit(); sys.exit()
+                        pygame.quit()
+                        sys.exit()
                 else:
                     perform_attack(mouse_pos)
 
     if not paused:
         keys = pygame.key.get_pressed()
         handle_player_movement(keys)
-        # schedule path requests & update ai
+        stop_talking_if_far()
+        tick_npc_timers()
+
         for e in enemies:
             if not e["dead"]:
                 px_tile = tile_from_world(player["x"], player["y"])
@@ -1015,7 +1098,6 @@ while running:
             compute_enemy_path(e)
             e["pf_request"] = False
 
-        # timers
         if player["attack_cooldown"] > 0: player["attack_cooldown"] -= 1
         if player["swipe_timer"] > 0: player["swipe_timer"] -= 1
         if player["dodge_timer"] > 0: player["dodge_timer"] -= 1
@@ -1034,7 +1116,6 @@ while running:
         if player["hp"] <= 0:
             player["hp"] = 0
 
-        # Update animations (player + enemies)
         keys = pygame.key.get_pressed()
         tick_player_anim(dt, keys)
         for e in enemies:
@@ -1043,30 +1124,34 @@ while running:
     update_camera()
 
     # ---------- Draw ----------
-    # Render world to a smaller surface (VIEW_W x VIEW_H) then scale to screen for zoom effect
     world_surface = pygame.Surface((VIEW_W, VIEW_H))
     world_surface.fill(BLACK)
 
     draw_world(world_surface)
     draw_afterimages(world_surface)
     draw_enemies(world_surface, dt)
-    # player draw uses keyboard to choose animation state; draw to world surface
+    # draw NPCs into world surface so they are affected by camera/zoom
+    draw_npcs(world_surface)
     draw_player(world_surface, pygame.key.get_pressed())
     draw_sparks_and_flash(world_surface)
 
-    # Scale up and blit to the main screen
     scaled = pygame.transform.smoothscale(world_surface, (WIDTH, HEIGHT))
     screen.blit(scaled, (0, 0))
 
-    # HUD (drawn on top of scaled world, in screen coordinates)
+    # HUD (screen coords)
     pygame.draw.rect(screen, (120, 0, 0), (18, 18, 204, 18))
     pygame.draw.rect(screen, RED, (18, 18, 204 * max(0.0, player["hp"] / 100.0), 18))
     hp_text = FONT.render(f"HP: {int(player['hp'])}", True, WHITE)
     screen.blit(hp_text, (230, 14))
 
-    if paused:
-        draw_pause_menu(mouse_pos)
+    # draw dialogue box on top of everything (handles its own fade)
+    draw_dialogue_box()
 
+    # Draw help screen if toggled
+    if show_help:
+        button_rect = draw_help_screen()
+
+    # If dead, overlay death message
     if player["hp"] <= 0:
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA); overlay.fill((0,0,0,200))
         screen.blit(overlay, (0,0))
