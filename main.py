@@ -1,5 +1,6 @@
-# scuffed_bloodborne_phase2_sprites.py
+# scuffed_bloodborne_phase2_sprites_animated.py
 # Phase 2: Smooth camera (lerp), A* pathfinding for enemies, enemy telegraph+attack animations.
+# Integrated: Structured map generator + Zoomed camera (1.5x)
 # Uses heavy metal pixel art pack if available; falls back to original placeholders.
 # Requires pygame: pip install pygame
 
@@ -8,8 +9,12 @@ from collections import deque
 
 pygame.init()
 WIDTH, HEIGHT = 800, 600
+ZOOM = 1.5  # <<-- zoom factor requested
+VIEW_W = int(WIDTH / ZOOM)
+VIEW_H = int(HEIGHT / ZOOM)
+
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Scuffed Bloodborne - Phase 2 (Camera, A*, Enemy Attacks) - Sprites")
+pygame.display.set_caption("Scuffed Bloodborne - Phase 2 (Camera, A*, Enemy Attacks) - Animated (Zoomed)")
 clock = pygame.time.Clock()
 FONT = pygame.font.SysFont("monospace", 18)
 
@@ -32,7 +37,6 @@ MAP_TILES_X = 60   # larger map (2400 px)
 MAP_TILES_Y = 48   # (1920 px)
 
 # ---------- Utility: asset loader with fallbacks ----------
-# This will try a few likely base directories where the pack might be located.
 ASSET_BASES = [
     "heavy metal pixel art pack",
     "heavy-metal-pixel-art-sprites-win",
@@ -43,77 +47,255 @@ ASSET_BASES = [
 ]
 
 def find_asset(rel_path):
-    """Return the first existing full path for rel_path inside ASSET_BASES, or None."""
     for base in ASSET_BASES:
         candidate = os.path.join(base, rel_path)
         if os.path.exists(candidate):
             return candidate
-    # try direct relative path too
     if os.path.exists(rel_path):
         return rel_path
     return None
 
-def load_sprite(rel_path, scale=None):
-    """Load sprite if found; return Surface or None."""
+def load_image(rel_path):
     p = find_asset(rel_path)
     if not p:
         return None
     try:
-        img = pygame.image.load(p).convert_alpha()
-        if scale is not None:
-            img = pygame.transform.smoothscale(img, scale)
-        return img
+        return pygame.image.load(p).convert_alpha()
     except Exception as ex:
-        print(f"Failed to load asset '{p}': {ex}")
+        print(f"Failed to load image '{p}': {ex}")
         return None
 
-# ---------- Preferred asset paths (as confirmed) ----------
-# Note: these are relative to the pack root (the loader will search ASSET_BASES)
-P_PLAYER = os.path.join("_CHAR", "heroes", "carpathia", "carpathia single.png")
-P_ENEMY = os.path.join("_CHAR", "creatures", "black knight.png")
-P_TILE_FLOOR = os.path.join("_ENVIRONMENT", "_tiling background brick.png")
-P_TILE_WALL = os.path.join("_ENVIRONMENT", "old building1.png")
-P_ATTACK_FX = os.path.join("_VFX", "fireball.png")
+def slice_sheet_to_frames(rel_path, frame_w=None, frame_h=None, scale=None):
+    """
+    Robust sprite-sheet slicer. (unchanged)
+    """
+    p = find_asset(rel_path)
+    if not p:
+        return []
 
-# ---------- Load assets (scaled) ----------
-player_img = load_sprite(f"assets/_CHAR/heroes/fernando/fernando single.png", (48, 48))
-enemy_img  = load_sprite(f"assets/_CHAR/creatures/black knight.png", (42, 42))
-tile_floor = load_sprite(f"assets/_ENVIRONMENT/tiling backgrounds/_tiling background brick.png", (TILE_SIZE, TILE_SIZE))
-tile_wall  = load_sprite(f"assets/_ENVIRONMENT/old building1.png", (TILE_SIZE, TILE_SIZE))
-slash_fx   = load_sprite(f"assets/_VFX/fireball.png", (90, 90))
+    try:
+        sheet = pygame.image.load(p).convert_alpha()
+    except Exception as ex:
+        print(f"Failed to load sheet '{p}': {ex}")
+        return []
 
-# inform about which assets were found
+    sheet_w, sheet_h = sheet.get_size()
+
+    # If both frame_w and frame_h provided and divide evenly -> grid slicing
+    if frame_w and frame_h and sheet_w % frame_w == 0 and sheet_h % frame_h == 0:
+        frames = []
+        cols = sheet_w // frame_w
+        rows = sheet_h // frame_h
+        for ry in range(rows):
+            for cx in range(cols):
+                rect = pygame.Rect(cx*frame_w, ry*frame_h, frame_w, frame_h)
+                frame = sheet.subsurface(rect).copy()
+                if scale is not None:
+                    frame = pygame.transform.smoothscale(frame, scale)
+                frames.append(frame)
+        return frames
+
+    # Otherwise attempt single-row auto-detect (vertical separators)
+    alpha_arr = []
+    for x in range(sheet_w):
+        col_transparent = True
+        for y in range(sheet_h):
+            px = sheet.get_at((x, y))
+            if px.a != 0:
+                col_transparent = False
+                break
+        alpha_arr.append(col_transparent)
+
+    frames = []
+    in_span = False
+    span_start = 0
+    for x, is_trans in enumerate(alpha_arr):
+        if not is_trans and not in_span:
+            in_span = True
+            span_start = x
+        elif is_trans and in_span:
+            span_end = x - 1
+            w = span_end - span_start + 1
+            rect = pygame.Rect(span_start, 0, w, sheet_h)
+            frame = sheet.subsurface(rect).copy()
+            # Trim top/bottom transparent rows if present
+            top_trim = 0
+            bottom_trim = sheet_h - 1
+            for yy in range(sheet_h):
+                row_has_pixel = False
+                for xx in range(span_start, span_end+1):
+                    if sheet.get_at((xx, yy)).a != 0:
+                        row_has_pixel = True
+                        break
+                if row_has_pixel:
+                    top_trim = yy
+                    break
+            for yy in range(sheet_h-1, -1, -1):
+                row_has_pixel = False
+                for xx in range(span_start, span_end+1):
+                    if sheet.get_at((xx, yy)).a != 0:
+                        row_has_pixel = True
+                        break
+                if row_has_pixel:
+                    bottom_trim = yy
+                    break
+            trimmed_h = bottom_trim - top_trim + 1
+            if trimmed_h > 0:
+                rect2 = pygame.Rect(span_start, top_trim, w, trimmed_h)
+                frame = sheet.subsurface(rect2).copy()
+            if scale is not None:
+                frame = pygame.transform.smoothscale(frame, scale)
+            frames.append(frame)
+            in_span = False
+    if in_span:
+        span_end = sheet_w - 1
+        w = span_end - span_start + 1
+        rect = pygame.Rect(span_start, 0, w, sheet_h)
+        frame = sheet.subsurface(rect).copy()
+        top_trim = 0
+        bottom_trim = sheet_h - 1
+        for yy in range(sheet_h):
+            row_has_pixel = False
+            for xx in range(span_start, span_end+1):
+                if sheet.get_at((xx, yy)).a != 0:
+                    row_has_pixel = True
+                    break
+            if row_has_pixel:
+                top_trim = yy
+                break
+        for yy in range(sheet_h-1, -1, -1):
+            row_has_pixel = False
+            for xx in range(span_start, span_end+1):
+                if sheet.get_at((xx, yy)).a != 0:
+                    row_has_pixel = True
+                    break
+            if row_has_pixel:
+                bottom_trim = yy
+                break
+        trimmed_h = bottom_trim - top_trim + 1
+        if trimmed_h > 0:
+            rect2 = pygame.Rect(span_start, top_trim, w, trimmed_h)
+            frame = sheet.subsurface(rect2).copy()
+        if scale is not None:
+            frame = pygame.transform.smoothscale(frame, scale)
+        frames.append(frame)
+
+    if not frames:
+        frame = sheet.copy()
+        if scale is not None:
+            frame = pygame.transform.smoothscale(frame, scale)
+        frames = [frame]
+
+    frames = [f for f in frames if f.get_width() > 2 and f.get_height() > 2]
+
+    return frames
+
+
+# ---------- Preferred asset relative paths ----------
+P_PLAYER_SHEET = os.path.join("_CHAR", "heroes", "fernando", "fernando.png")
+P_ENEMY_SHEET  = os.path.join("_CHAR", "creatures", "black knigh caped.png")
+P_TILE_FLOOR   = os.path.join("_ENVIRONMENT", "tiling backgrounds", "_tiling background brick.png")
+P_TILE_WALL    = os.path.join("_ENVIRONMENT", "old building1.png")
+P_ATTACK_FX    = os.path.join("_VFX", "fireball.png")
+
+# ---------- Load non-animated assets ----------
+tile_floor_img = load_image(P_TILE_FLOOR)
+if tile_floor_img:
+    tile_floor_img = pygame.transform.smoothscale(tile_floor_img, (TILE_SIZE, TILE_SIZE))
+tile_wall_img = load_image(P_TILE_WALL)
+if tile_wall_img:
+    tile_wall_img = pygame.transform.smoothscale(tile_wall_img, (TILE_SIZE, TILE_SIZE))
+slash_fx_img = load_image(P_ATTACK_FX)
+if slash_fx_img:
+    slash_fx_img = pygame.transform.smoothscale(slash_fx_img, (90, 90))
+
+# ---------- Load & slice sprite sheets into animation frames ----------
+PLAYER_FRAME_W, PLAYER_FRAME_H = 64, 64
+PLAYER_SCALE = (48, 48)
+player_frames_all = slice_sheet_to_frames(P_PLAYER_SHEET, PLAYER_FRAME_W, PLAYER_FRAME_H, scale=PLAYER_SCALE)
+
+ENEMY_FRAME_W, ENEMY_FRAME_H = 96, 121
+ENEMY_SCALE = (42, 53)
+enemy_frames_all = slice_sheet_to_frames(P_ENEMY_SHEET, ENEMY_FRAME_W, ENEMY_FRAME_H, scale=ENEMY_SCALE)
+
+# Inform about loads
 print("Asset load summary:")
-print(" player_img:", "FOUND" if player_img else "MISSING -> placeholder will be used")
-print(" enemy_img :", "FOUND" if enemy_img else "MISSING -> placeholder will be used")
-print(" tile_floor:", "FOUND" if tile_floor else "MISSING -> placeholder will be used")
-print(" tile_wall :", "FOUND" if tile_wall else "MISSING -> placeholder will be used")
-print(" slash_fx  :", "FOUND" if slash_fx else "MISSING -> placeholder FX will be used")
+print(" player sheet frames:", len(player_frames_all), "frames found" if player_frames_all else "MISSING -> placeholder used")
+print(" enemy sheet frames :", len(enemy_frames_all), "frames found" if enemy_frames_all else "MISSING -> placeholder used")
+print(" tile_floor:", "FOUND" if tile_floor_img else "MISSING -> placeholder used")
+print(" tile_wall :", "FOUND" if tile_wall_img else "MISSING -> placeholder used")
+print(" slash_fx  :", "FOUND" if slash_fx_img else "MISSING -> placeholder FX used")
 
-# ---------- Map generation ----------
+# ---------- Map generation (structured) ----------
 def generate_map():
-    grid = [["." for _ in range(MAP_TILES_X)] for _ in range(MAP_TILES_Y)]
-    for x in range(MAP_TILES_X):
-        grid[0][x] = "W"
-        grid[MAP_TILES_Y - 1][x] = "W"
-    for y in range(MAP_TILES_Y):
-        grid[y][0] = "W"
-        grid[y][MAP_TILES_X - 1] = "W"
-    random.seed(1337)
-    for _ in range(420):
-        bx = random.randint(2, MAP_TILES_X - 4)
-        by = random.randint(2, MAP_TILES_Y - 4)
-        w = random.randint(1, 5)
-        h = random.randint(1, 5)
-        for yy in range(by, min(MAP_TILES_Y - 1, by + h)):
-            for xx in range(bx, min(MAP_TILES_X - 1, bx + w)):
-                if 0 < xx < MAP_TILES_X - 1 and 0 < yy < MAP_TILES_Y - 1:
-                    grid[yy][xx] = "W"
+    # Start filled with walls
+    grid = [["W" for _ in range(MAP_TILES_X)] for _ in range(MAP_TILES_Y)]
+
+    # Carve the outer boundary as walls (already walls)
+    # Carve a main horizontal street (wide)
+    mid_y = MAP_TILES_Y // 2
+    for x in range(2, MAP_TILES_X - 2):
+        for y in range(mid_y - 2, mid_y + 3):
+            grid[y][x] = "."
+
+    # Carve several vertical connecting streets (like alleys)
+    for x in range(6, MAP_TILES_X - 6, 12):
+        # create a vertical corridor with some randomness
+        top = 3
+        bottom = MAP_TILES_Y - 4
+        for y in range(top, bottom):
+            if random.random() < 0.85:
+                grid[y][x] = "."
+        # carve a thicker entrance near the main street
+        for dy in range(-2, 3):
+            if 0 <= mid_y + dy < MAP_TILES_Y:
+                grid[mid_y + dy][x] = "."
+
+    # Central plaza
     cx, cy = MAP_TILES_X // 2, MAP_TILES_Y // 2
     for yy in range(cy - 6, cy + 7):
         for xx in range(cx - 8, cx + 9):
-            if 0 < xx < MAP_TILES_X - 1 and 0 < yy < MAP_TILES_Y - 1:
+            if 0 <= xx < MAP_TILES_X and 0 <= yy < MAP_TILES_Y:
                 grid[yy][xx] = "."
+
+    # Add a number of side rooms and alleys
+    for _ in range(10):
+        rw = random.randint(3, 7)
+        rh = random.randint(3, 6)
+        rx = random.randint(3, MAP_TILES_X - rw - 3)
+        ry = random.randint(3, MAP_TILES_Y - rh - 3)
+        # make it more likely to connect to an existing '.' tile by carving a corridor
+        for y in range(ry, ry+rh):
+            for x in range(rx, rx+rw):
+                if random.random() < 0.95:
+                    grid[y][x] = "."
+        # carve a connecting corridor toward center
+        if random.random() < 0.9:
+            # simple straight connector
+            if random.random() < 0.5:
+                # horizontal connector
+                sx = rx + rw // 2
+                for x in range(min(sx, cx), max(sx, cx)+1):
+                    for dy in range(-1,2):
+                        yy = ry + rh//2 + dy
+                        if 0 <= yy < MAP_TILES_Y:
+                            grid[yy][x] = "."
+            else:
+                sy = ry + rh // 2
+                for y in range(min(sy, cy), max(sy, cy)+1):
+                    for dx in range(-1,2):
+                        xx = rx + rw//2 + dx
+                        if 0 <= xx < MAP_TILES_X:
+                            grid[y][xx] = "."
+
+    # Ensure border rows/cols remain walls
+    for x in range(MAP_TILES_X):
+        grid[0][x] = "W"
+        grid[MAP_TILES_Y-1][x] = "W"
+    for y in range(MAP_TILES_Y):
+        grid[y][0] = "W"
+        grid[y][MAP_TILES_X-1] = "W"
+
     return grid
 
 WORLD = generate_map()
@@ -134,7 +316,12 @@ player = {
     "dodge_cooldown": 0,
     "dodge_timer": 0,
     "invincible": 0,
-    "afterimages": deque(maxlen=6)
+    "afterimages": deque(maxlen=6),
+    # animation state
+    "anim_state": "idle",
+    "anim_index": 0,
+    "anim_timer": 0.0,
+    "anim_frame_rate": 0.08,  # seconds per frame
 }
 
 # ---------- spawn points ----------
@@ -173,7 +360,12 @@ def create_enemy(x, y):
         "telegraph_len": 26,    # frames of telegraph
         "attack_len": 12,       # frames of attack (damage applied mid)
         "cooldown_len": 40,
-        "last_player_tile": None
+        "last_player_tile": None,
+        # animation
+        "anim_state": "idle",
+        "anim_index": 0,
+        "anim_timer": 0.0,
+        "anim_frame_rate": 0.12
     }
 
 # Create initial enemies
@@ -184,20 +376,24 @@ screen_flash = 0
 sparks = []
 
 # ---------- Camera (smooth lerp) ----------
-camera_x = player["x"] - WIDTH / 2
-camera_y = player["y"] - HEIGHT / 2
+# Camera top-left coordinates are in world pixel units.
+camera_x = player["x"] - VIEW_W / 2
+camera_y = player["y"] - VIEW_H / 2
+
 def update_camera():
     global camera_x, camera_y
-    target_x = player["x"] - WIDTH / 2
-    target_y = player["y"] - HEIGHT / 2
-    # clamp to bounds
-    target_x = max(0, min(WORLD_W - WIDTH, target_x))
-    target_y = max(0, min(WORLD_H - HEIGHT, target_y))
+    # target center is player's position, but taking into account the zoomed viewport size
+    target_x = player["x"] - VIEW_W / 2
+    target_y = player["y"] - VIEW_H / 2
+    # clamp to bounds using VIEW_W/VIEW_H (not screen size)
+    target_x = max(0, min(WORLD_W - VIEW_W, target_x))
+    target_y = max(0, min(WORLD_H - VIEW_H, target_y))
     # lerp smoothing
     camera_x += (target_x - camera_x) * 0.12
     camera_y += (target_y - camera_y) * 0.12
 
 def world_to_screen(wx, wy):
+    # returns coordinates relative to the world surface (pre-scale).
     return int(wx - camera_x), int(wy - camera_y)
 
 # ---------- Collision ----------
@@ -292,7 +488,9 @@ def handle_player_movement(keys):
 def player_dodge_towards_cursor():
     if player["dodge_cooldown"] <= 0 and player["dodge_timer"] <= 0:
         mx, my = pygame.mouse.get_pos()
-        world_mx = mx + camera_x; world_my = my + camera_y
+        # convert screen mouse into world coordinates considering zoom
+        world_mx = (mx / ZOOM) + camera_x
+        world_my = (my / ZOOM) + camera_y
         angle = math.atan2(world_my - player["y"], world_mx - player["x"])
         dash = 84
         tx = player["x"] + math.cos(angle) * dash
@@ -307,18 +505,16 @@ def player_dodge_towards_cursor():
 
 # ---------- Enemy behavior (with pathing & attacks) ----------
 def enemy_request_path(e):
-    # set a flag so path computation can be run outside tight update loop
     e["pf_request"] = True
 
 def compute_enemy_path(e):
-    # compute path from enemy tile to player tile
     start = tile_from_world(e["x"], e["y"])
     goal = tile_from_world(player["x"], player["y"])
     e["last_player_tile"] = goal
     path = astar(start, goal)
     e["path"] = path
     e["path_index"] = 0
-    e["pf_cooldown"] = 36  # wait frames before trying again
+    e["pf_cooldown"] = 36
 
 def follow_path(e):
     if not e["path"]:
@@ -351,16 +547,26 @@ def update_enemy_ai(e):
         elif e.get("respawn_timer", 0) > 0:
             e["respawn_timer"] -= 1
             if e["respawn_timer"] <= 0:
-                # respawn at random spawn
                 sx, sy = random.choice(spawn_points)
-                e["x"], e["y"] = sx, sy
-                e["hp"] = 50; e["dead"] = False; e["fade"] = 255; e["sink"]=0; e["death_timer"]=0
+                e.update({
+                    "x": sx, "y": sy,
+                    "hp": 50, "dead": False,
+                    "fade": 255, "sink": 0,
+                    "death_timer": 0,
+                    "state": "idle",
+                    "state_timer": 0,
+                    "path": [],
+                    "path_index": 0,
+                    "pf_cooldown": 0,
+                    "pf_request": False,
+                    "anim_state": "idle",
+                    "anim_index": 0,
+                    "anim_timer": 0.0,
+                })
         return
 
-    # pathfinding cooldown decrement
     if e["pf_cooldown"] > 0:
         e["pf_cooldown"] -= 1
-    # if request flagged and allowed, compute path
     if e.get("pf_request", False) and e["pf_cooldown"] <= 0:
         compute_enemy_path(e)
         e["pf_request"] = False
@@ -369,16 +575,13 @@ def update_enemy_ai(e):
     dx = px - e["x"]; dy = py - e["y"]
     dist = math.hypot(dx, dy)
 
-    # if within attack approach range, use direct attack state
     attack_dist = player["radius"] + e["radius"] + 10
     if dist <= attack_dist + 18 and e["state"] not in ("telegraph","attack","cooldown"):
         e["state"] = "telegraph"
         e["state_timer"] = e["telegraph_len"]
         return
 
-    # if very far, idle / slow wander
     if dist > 500:
-        # small random walk occasionally
         if random.random() < 0.01:
             nx = e["x"] + random.uniform(-1,1)*20
             ny = e["y"] + random.uniform(-1,1)*20
@@ -386,21 +589,17 @@ def update_enemy_ai(e):
                 e["x"] = nx
             if can_move_entity(e["x"], ny, e["radius"]):
                 e["y"] = ny
-        # also schedule pathfinding occasionally for responsiveness
         if e["pf_cooldown"] <= 0 and random.random() < 0.04:
             enemy_request_path(e)
         return
 
-    # if in chase state: ensure path exists to player's current tile; recalc if player moved tile.
     player_tile = tile_from_world(px, py)
     if not e["path"] or e.get("last_player_tile") != player_tile:
         if e["pf_cooldown"] <= 0:
             compute_enemy_path(e)
-    # follow path (if exists) else direct chase
     if e["path"]:
         follow_path(e)
     else:
-        # direct movement when path missing (short distances)
         if dist > 2:
             nx = e["x"] + (dx / dist) * e["speed"]
             ny = e["y"] + (dy / dist) * e["speed"]
@@ -412,16 +611,12 @@ def update_enemy_ai(e):
     # handle attack state machine timers
     if e["state"] == "telegraph":
         e["state_timer"] -= 1
-        # visual telegraph drawn in render; when timer finishes, go to attack
         if e["state_timer"] <= 0:
             e["state"] = "attack"
             e["state_timer"] = e["attack_len"]
-            # mark damage will apply at mid-point (we handle in update loop)
     elif e["state"] == "attack":
-        # apply damage at midpoint of attack_len
         mid = e["attack_len"] // 2
         if e["state_timer"] == mid:
-            # damage if player in range
             ex, ey = e["x"], e["y"]
             dxp = player["x"] - ex; dyp = player["y"] - ey
             if math.hypot(dxp, dyp) <= (player["radius"] + e["radius"] + 6):
@@ -445,8 +640,9 @@ def perform_attack(mouse_pos_screen):
         return
     player["attack_cooldown"] = 32
     player["swipe_timer"] = 10
-    mx = mouse_pos_screen[0] + camera_x
-    my = mouse_pos_screen[1] + camera_y
+    # convert screen mouse into world coordinates considering zoom
+    mx = (mouse_pos_screen[0] / ZOOM) + camera_x
+    my = (mouse_pos_screen[1] / ZOOM) + camera_y
     px, py = player["x"], player["y"]
     angle = math.atan2(my - py, mx - px)
     player["attack_angle"] = angle
@@ -470,29 +666,121 @@ def perform_attack(mouse_pos_screen):
                     e["death_timer"] = 30
                     e["respawn_timer"] = 600  # frames until respawn
 
-# ---------- Draw helpers ----------
-def draw_world():
+# ---------- Animation helpers ----------
+def player_choose_anim_state(keys):
+    # attack overrides movement
+    if player["swipe_timer"] > 0:
+        return "attack"
+    moving = keys[pygame.K_w] or keys[pygame.K_s] or keys[pygame.K_a] or keys[pygame.K_d]
+    if moving:
+        return "run"
+    return "idle"
+
+def tick_player_anim(dt, keys):
+    # Decide desired anim state
+    desired = player_choose_anim_state(keys)
+    if player["anim_state"] != desired:
+        player["anim_state"] = desired
+        player["anim_index"] = 0
+        player["anim_timer"] = 0.0
+    # Advance frame
+    frames = []
+    # determine frames slice based on loaded sheet
+    if player_frames_all:
+        p = find_asset(P_PLAYER_SHEET)
+        if p:
+            try:
+                sheet = pygame.image.load(p)
+                sheet_w, sheet_h = sheet.get_size()
+                cols = sheet_w // PLAYER_FRAME_W
+                rows = sheet_h // PLAYER_FRAME_H
+            except:
+                cols = max(1, len(player_frames_all))
+                rows = 1
+        else:
+            cols = max(1, len(player_frames_all))
+            rows = 1
+        # map rows to animations: row0 idle, row1 run, row2 attack, row3 misc
+        if rows >= 4:
+            row_map = {"idle":0, "run":1, "attack":2, "misc":3}
+            r = row_map.get(player["anim_state"], 0)
+            start = r * cols
+            frames = player_frames_all[start:start+cols]
+        elif rows == 2:
+            # fallback: first row idle, second row run/attack
+            if player["anim_state"] == "idle":
+                frames = player_frames_all[0:cols]
+            else:
+                frames = player_frames_all[cols:cols*2]
+        else:
+            # single row - split into portions: use all frames for all states
+            frames = player_frames_all
+    # If none loaded, frames empty -> fallback handled in draw_player
+    if frames:
+        player["anim_timer"] += dt
+        if player["anim_timer"] >= player["anim_frame_rate"]:
+            player["anim_timer"] = 0.0
+            player["anim_index"] = (player["anim_index"] + 1) % len(frames)
+
+def tick_enemy_anim(e, dt):
+    # determine frames for this enemy from the sheet
+    if not enemy_frames_all:
+        return
+    p = find_asset(P_ENEMY_SHEET)
+    if p:
+        try:
+            sheet = pygame.image.load(p)
+            sheet_w, sheet_h = sheet.get_size()
+            cols = sheet_w // ENEMY_FRAME_W
+            rows = sheet_h // ENEMY_FRAME_H
+        except:
+            cols = max(1, len(enemy_frames_all))
+            rows = 1
+    else:
+        cols = max(1, len(enemy_frames_all))
+        rows = 1
+
+    # e["state"] can be telegraph/attack/cooldown/idle; map these to frames
+    if rows >= 2:
+        # assume row 0 idle, row 1 attack
+        if e["state"] == "attack":
+            start = cols * 1
+            frames = enemy_frames_all[start:start+cols]
+        else:
+            frames = enemy_frames_all[0:cols]
+    else:
+        frames = enemy_frames_all
+
+    if not frames:
+        return
+
+    e["anim_timer"] += dt
+    if e["anim_timer"] >= e["anim_frame_rate"]:
+        e["anim_timer"] = 0.0
+        e["anim_index"] = (e["anim_index"] + 1) % len(frames)
+
+# ---------- Draw helpers (now accept a target surface to draw onto) ----------
+def draw_world(target_surf):
     left_tile = max(0, int(camera_x // TILE_SIZE) - 1)
-    right_tile = min(MAP_TILES_X - 1, int((camera_x + WIDTH) // TILE_SIZE) + 1)
+    right_tile = min(MAP_TILES_X - 1, int((camera_x + VIEW_W) // TILE_SIZE) + 1)
     top_tile = max(0, int(camera_y // TILE_SIZE) - 1)
-    bottom_tile = min(MAP_TILES_Y - 1, int((camera_y + HEIGHT) // TILE_SIZE) + 1)
+    bottom_tile = min(MAP_TILES_Y - 1, int((camera_y + VIEW_H) // TILE_SIZE) + 1)
     for ty in range(top_tile, bottom_tile + 1):
         for tx in range(left_tile, right_tile + 1):
             ch = WORLD[ty][tx]
             dest = pygame.Rect(tx * TILE_SIZE - camera_x, ty * TILE_SIZE - camera_y, TILE_SIZE, TILE_SIZE)
             if ch == "W":
-                if tile_wall:
-                    # tile_wall may be larger; we use scaled tile
-                    screen.blit(tile_wall, dest)
+                if tile_wall_img:
+                    target_surf.blit(tile_wall_img, dest)
                 else:
-                    pygame.draw.rect(screen, WALL_COLOR, dest)
+                    pygame.draw.rect(target_surf, WALL_COLOR, dest)
             else:
-                if tile_floor:
-                    screen.blit(tile_floor, dest)
+                if tile_floor_img:
+                    target_surf.blit(tile_floor_img, dest)
                 else:
-                    pygame.draw.rect(screen, FLOOR_COLOR, dest)
+                    pygame.draw.rect(target_surf, FLOOR_COLOR, dest)
 
-def draw_afterimages():
+def draw_afterimages(target_surf):
     if not player["afterimages"]:
         return
     surf = pygame.Surface((player["radius"]*2, player["radius"]*2), pygame.SRCALPHA)
@@ -501,72 +789,129 @@ def draw_afterimages():
         surf.fill((0,0,0,0))
         pygame.draw.circle(surf, (255,255,255,alpha), (player["radius"], player["radius"]), player["radius"])
         sx, sy = world_to_screen(ax, ay)
-        screen.blit(surf, (sx - player["radius"], sy - player["radius"]))
+        target_surf.blit(surf, (sx - player["radius"], sy - player["radius"]))
 
-def draw_player():
+def draw_player(target_surf, keys):
     sx, sy = world_to_screen(player["x"], player["y"])
-    # sprite rendering if available
-    if player_img:
-        rect = player_img.get_rect(center=(sx, sy))
-        # if invincible, slightly tint by drawing a translucent layer
+    # animated sprite if available
+    frames = []
+    if player_frames_all:
+        p = find_asset(P_PLAYER_SHEET)
+        if p:
+            try:
+                sheet = pygame.image.load(p)
+                sheet_w, sheet_h = sheet.get_size()
+                cols = sheet_w // PLAYER_FRAME_W
+                rows = sheet_h // PLAYER_FRAME_H
+            except:
+                cols = max(1, len(player_frames_all))
+                rows = 1
+        else:
+            cols = max(1, len(player_frames_all))
+            rows = 1
+
+        if rows >= 4:
+            row_map = {"idle":0, "run":1, "attack":2, "misc":3}
+            r = row_map.get(player["anim_state"], 0)
+            start = r * cols
+            frames = player_frames_all[start:start+cols]
+        elif rows == 2:
+            if player["anim_state"] == "idle":
+                frames = player_frames_all[0:cols]
+            else:
+                frames = player_frames_all[cols:cols*2]
+        else:
+            frames = player_frames_all
+
+    if frames:
+        idx = player["anim_index"] % len(frames)
+        img = frames[idx]
+        rect = img.get_rect(center=(sx, sy))
+        # tint when invincible
         if player["invincible"] > 0:
-            tmp = player_img.copy()
+            tmp = img.copy()
             tint = pygame.Surface(tmp.get_size(), pygame.SRCALPHA)
             tint.fill((255, 220, 200, 90))
             tmp.blit(tint, (0,0), special_flags=pygame.BLEND_RGBA_ADD)
-            screen.blit(tmp, rect)
+            target_surf.blit(tmp, rect)
         else:
-            screen.blit(player_img, rect)
+            target_surf.blit(img, rect)
     else:
         body_color = (220, 30, 30) if player["invincible"] <= 0 else (255, 200, 180)
-        pygame.draw.circle(screen, body_color, (sx, sy), player["radius"])
+        pygame.draw.circle(target_surf, body_color, (sx, sy), player["radius"])
 
-    # swipe FX: prefer slash_fx image; otherwise draw the old big line
+    # swipe FX
     if player["swipe_timer"] > 0:
         length = player["attack_range"]
         angle = player["attack_angle"]
         x2 = player["x"] + math.cos(angle) * length
         y2 = player["y"] + math.sin(angle) * length
         x2s, y2s = world_to_screen(x2, y2)
-        if slash_fx:
-            # place centered roughly between player and end point, rotate if desired (simple blit centered)
-            # no rotation implemented because art might not be meant to rotate; center it at player + angle*offset
-            offset_x = (x2s + sx) // 2 - 45
-            offset_y = (y2s + sy) // 2 - 45
-            screen.blit(slash_fx, (offset_x, offset_y))
+        if slash_fx_img:
+            offset_x = (x2s + sx) // 2 - slash_fx_img.get_width() // 2
+            offset_y = (y2s + sy) // 2 - slash_fx_img.get_height() // 2
+            target_surf.blit(slash_fx_img, (offset_x, offset_y))
         else:
-            surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            surf = pygame.Surface((VIEW_W, VIEW_H), pygame.SRCALPHA)
             pygame.draw.line(surf, SLASH_COLOR + (120,), (sx, sy), (x2s, y2s), 18)
-            screen.blit(surf, (0, 0))
+            target_surf.blit(surf, (0, 0))
 
-def draw_enemies():
+def draw_enemies(target_surf, dt):
     for e in enemies:
         sx, sy = world_to_screen(e["x"], e["y"] + e.get("sink", 0))
         if e["dead"]:
             surf = pygame.Surface((e["radius"]*2+4, e["radius"]*2+4), pygame.SRCALPHA)
             clr = (120,120,160, max(0, e["fade"]))
             pygame.draw.circle(surf, clr, (e["radius"]+2, e["radius"]+2), e["radius"])
-            screen.blit(surf, (sx - e["radius"], sy - e["radius"]))
-        else:
-            # if telegraph: draw ring telegraph
-            if e["state"] == "telegraph":
-                alpha = 180
-                surf = pygame.Surface((e["radius"]*6, e["radius"]*6), pygame.SRCALPHA)
-                pygame.draw.circle(surf, TELEGRAPH_COLOR + (alpha,), (surf.get_width()//2, surf.get_height()//2), e["radius"]*3)
-                screen.blit(surf, (sx - surf.get_width()//2, sy - surf.get_height()//2))
-            # draw enemy body: sprite if exists, else circle
-            if enemy_img:
-                rect = enemy_img.get_rect(center=(sx, sy))
-                screen.blit(enemy_img, rect)
-            else:
-                pygame.draw.circle(screen, DARK_GRAY, (sx, sy), e["radius"])
-            # small HP bar above enemy
-            if e["hp"] < 50:
-                w = int((e["hp"]/50.0) * (e["radius"]*2))
-                pygame.draw.rect(screen, (80,0,0), (sx - e["radius"], sy - e["radius"] - 8, e["radius"]*2, 5))
-                pygame.draw.rect(screen, (200,0,0), (sx - e["radius"], sy - e["radius"] - 8, w, 5))
+            target_surf.blit(surf, (sx - e["radius"], sy - e["radius"]))
+            continue
 
-def draw_sparks_and_flash():
+        if e["state"] == "telegraph":
+            alpha = 180
+            surf = pygame.Surface((e["radius"]*6, e["radius"]*6), pygame.SRCALPHA)
+            pygame.draw.circle(surf, TELEGRAPH_COLOR + (alpha,), (surf.get_width()//2, surf.get_height()//2), e["radius"]*3)
+            target_surf.blit(surf, (sx - surf.get_width()//2, sy - surf.get_height()//2))
+
+        # draw enemy sprite frames if available
+        frames = []
+        if enemy_frames_all:
+            p = find_asset(P_ENEMY_SHEET)
+            if p:
+                try:
+                    sheet = pygame.image.load(p)
+                    sheet_w, sheet_h = sheet.get_size()
+                    cols = sheet_w // ENEMY_FRAME_W
+                    rows = sheet_h // ENEMY_FRAME_H
+                except:
+                    cols = max(1, len(enemy_frames_all))
+                    rows = 1
+            else:
+                cols = max(1, len(enemy_frames_all))
+                rows = 1
+
+            if rows >= 2:
+                if e["state"] == "attack":
+                    frames = enemy_frames_all[cols:cols*2]
+                else:
+                    frames = enemy_frames_all[0:cols]
+            else:
+                frames = enemy_frames_all
+
+        if frames:
+            idx = e["anim_index"] % len(frames)
+            img = frames[idx]
+            rect = img.get_rect(center=(sx, sy))
+            target_surf.blit(img, rect)
+        else:
+            pygame.draw.circle(target_surf, DARK_GRAY, (sx, sy), e["radius"])
+
+        # HP bar
+        if e["hp"] < 50:
+            w = int((e["hp"]/50.0) * (e["radius"]*2))
+            pygame.draw.rect(target_surf, (80,0,0), (sx - e["radius"], sy - e["radius"] - 8, e["radius"]*2, 5))
+            pygame.draw.rect(target_surf, (200,0,0), (sx - e["radius"], sy - e["radius"] - 8, w, 5))
+
+def draw_sparks_and_flash(target_surf):
     global screen_flash
     for s in list(sparks):
         age = s["timer"]
@@ -575,15 +920,15 @@ def draw_sparks_and_flash():
         surf = pygame.Surface((int(size*2)+6, int(size*2)+6), pygame.SRCALPHA)
         pygame.draw.circle(surf, (SPARK_COLOR[0], SPARK_COLOR[1], SPARK_COLOR[2], alpha), (int(size)+3,int(size)+3), int(size))
         sx, sy = world_to_screen(s["x"], s["y"])
-        screen.blit(surf, (sx - size - 2, sy - size - 2))
+        target_surf.blit(surf, (sx - size - 2, sy - size - 2))
         s["timer"] -= 1
         if s["timer"] <= 0:
             sparks.remove(s)
     if screen_flash > 0:
         flash_alpha = int(80 * (screen_flash / 12.0))
-        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay = pygame.Surface((VIEW_W, VIEW_H), pygame.SRCALPHA)
         overlay.fill((255, 255, 255, flash_alpha))
-        screen.blit(overlay, (0, 0))
+        target_surf.blit(overlay, (0, 0))
 
 # ---------- Pause menu buttons ----------
 BTN_W = 220; BTN_H = 44
@@ -591,6 +936,7 @@ btn_restart_rect = pygame.Rect(WIDTH//2 - BTN_W//2, HEIGHT//2 - 20 - BTN_H - 8, 
 btn_quit_rect = pygame.Rect(WIDTH//2 - BTN_W//2, HEIGHT//2 + 20, BTN_W, BTN_H)
 
 def draw_pause_menu(mouse_pos):
+    # Pause menu should draw on the screen (not the scaled world) to keep UI crisp and sized correctly
     overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     overlay.fill((0,0,0,200))
     screen.blit(overlay, (0,0))
@@ -628,7 +974,8 @@ if len(enemies) == 0:
         enemies.append(create_enemy(sx, sy))
 
 while running:
-    dt = clock.tick(60)
+    ms = clock.tick(60)
+    dt = ms / 1000.0  # seconds
     mouse_pos = pygame.mouse.get_pos()
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -654,17 +1001,14 @@ while running:
     if not paused:
         keys = pygame.key.get_pressed()
         handle_player_movement(keys)
-        # spawn path requests or compute path occasionally
+        # schedule path requests & update ai
         for e in enemies:
-            # schedule pf requests if player moved to a different tile or pf cooldown expired
             if not e["dead"]:
                 px_tile = tile_from_world(player["x"], player["y"])
                 if e.get("last_player_tile") != px_tile and e["pf_cooldown"] <= 0:
                     enemy_request_path(e)
             update_enemy_ai(e)
 
-        # process pf requests opportunistically but avoid doing many in one frame:
-        # compute up to 3 paths per frame to avoid hitch spikes
         pf_to_do = [e for e in enemies if e.get("pf_request", False) and e["pf_cooldown"] <= 0]
         random.shuffle(pf_to_do)
         for e in pf_to_do[:3]:
@@ -677,7 +1021,7 @@ while running:
         if player["dodge_timer"] > 0: player["dodge_timer"] -= 1
         if player["dodge_cooldown"] > 0: player["dodge_cooldown"] -= 1
         if player["invincible"] > 0: player["invincible"] -= 1
-        # handle enemies with death->respawn
+
         for e in list(enemies):
             if e.get("dead") and e.get("respawn_timer", 0) > 0:
                 e["respawn_timer"] -= 1
@@ -685,20 +1029,36 @@ while running:
                     sx, sy = random.choice(spawn_points)
                     e["x"], e["y"] = sx, sy
                     e["hp"] = 50; e["dead"] = False; e["fade"]=255; e["sink"]=0; e["death_timer"]=0
+
         if screen_flash > 0: screen_flash -= 1
         if player["hp"] <= 0:
             player["hp"] = 0
 
+        # Update animations (player + enemies)
+        keys = pygame.key.get_pressed()
+        tick_player_anim(dt, keys)
+        for e in enemies:
+            tick_enemy_anim(e, dt)
+
     update_camera()
 
     # ---------- Draw ----------
-    screen.fill(BLACK)
-    draw_world()
-    draw_afterimages()
-    draw_enemies()
-    draw_player()
-    draw_sparks_and_flash()
-    # HUD
+    # Render world to a smaller surface (VIEW_W x VIEW_H) then scale to screen for zoom effect
+    world_surface = pygame.Surface((VIEW_W, VIEW_H))
+    world_surface.fill(BLACK)
+
+    draw_world(world_surface)
+    draw_afterimages(world_surface)
+    draw_enemies(world_surface, dt)
+    # player draw uses keyboard to choose animation state; draw to world surface
+    draw_player(world_surface, pygame.key.get_pressed())
+    draw_sparks_and_flash(world_surface)
+
+    # Scale up and blit to the main screen
+    scaled = pygame.transform.smoothscale(world_surface, (WIDTH, HEIGHT))
+    screen.blit(scaled, (0, 0))
+
+    # HUD (drawn on top of scaled world, in screen coordinates)
     pygame.draw.rect(screen, (120, 0, 0), (18, 18, 204, 18))
     pygame.draw.rect(screen, RED, (18, 18, 204 * max(0.0, player["hp"] / 100.0), 18))
     hp_text = FONT.render(f"HP: {int(player['hp'])}", True, WHITE)
