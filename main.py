@@ -13,6 +13,13 @@ screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Scuffed Bloodborne - Phase 2 (Camera, A*, Enemy Attacks) - NPCs")
 clock = pygame.time.Clock()
 FONT = pygame.font.SysFont("monospace", 18)
+# --- Hidden Message Easter Egg ---
+font = pygame.font.SysFont("consolas", 22)
+secret_text = (
+    "We changed what game engine we used 3 times.\n"
+)
+show_secret = False
+# ---------------------------------
 
 # ---------- Colors ----------
 WHITE = (255, 255, 255)
@@ -573,7 +580,7 @@ def update_enemy_ai(e):
             dxp = player["x"] - ex; dyp = player["y"] - ey
             if math.hypot(dxp, dyp) <= (player["radius"] + e["radius"] + 6):
                 if player["invincible"] <= 0:
-                    player["hp"] -= 6.5
+                    player["hp"] -= 10  # Increased from 6.5 to 10 (about 54% increase)
                     global screen_flash
                     screen_flash = max(screen_flash, 8)
                     player["invincible"] = 20
@@ -866,6 +873,10 @@ BTN_W = 220; BTN_H = 44
 btn_restart_rect = pygame.Rect(WIDTH//2 - BTN_W//2, HEIGHT//2 - 20 - BTN_H - 8, BTN_W, BTN_H)
 btn_quit_rect = pygame.Rect(WIDTH//2 - BTN_W//2, HEIGHT//2 + 20, BTN_W, BTN_H)
 
+# ---------- Death menu buttons ----------
+death_btn_restart_rect = pygame.Rect(WIDTH//2 - BTN_W//2, HEIGHT//2 + 40, BTN_W, BTN_H)
+death_btn_quit_rect = pygame.Rect(WIDTH//2 - BTN_W//2, HEIGHT//2 + 40 + BTN_H + 12, BTN_W, BTN_H)
+
 def draw_pause_menu(mouse_pos):
     overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     overlay.fill((0,0,0,200))
@@ -886,8 +897,37 @@ def draw_pause_menu(mouse_pos):
     text2 = FONT.render("Quit", True, WHITE)
     screen.blit(text2, (btn_quit_rect.centerx - text2.get_width()//2, btn_quit_rect.centery - text2.get_height()//2))
 
+def draw_death_menu(mouse_pos):
+    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    overlay.fill((0,0,0,220))
+    screen.blit(overlay, (0,0))
+    
+    # Large death message
+    death_font = pygame.font.SysFont("monospace", 48, bold=True)
+    title = death_font.render("YOU DIED", True, RED)
+    screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//2 - 80))
+    
+    mx, my = mouse_pos
+    
+    # Restart button
+    if death_btn_restart_rect.collidepoint(mx,my):
+        pygame.draw.rect(screen, BTN_HOVER, death_btn_restart_rect, border_radius=8)
+    else:
+        pygame.draw.rect(screen, BTN_BG, death_btn_restart_rect, border_radius=8)
+    text = FONT.render("Restart", True, WHITE)
+    screen.blit(text, (death_btn_restart_rect.centerx - text.get_width()//2, death_btn_restart_rect.centery - text.get_height()//2))
+    
+    # Quit button
+    if death_btn_quit_rect.collidepoint(mx,my):
+        pygame.draw.rect(screen, BTN_HOVER, death_btn_quit_rect, border_radius=8)
+    else:
+        pygame.draw.rect(screen, BTN_BG, death_btn_quit_rect, border_radius=8)
+    text2 = FONT.render("Quit", True, WHITE)
+    screen.blit(text2, (death_btn_quit_rect.centerx - text2.get_width()//2, death_btn_quit_rect.centery - text2.get_height()//2))
+
 # ---------- Restart helper ----------
 def restart_full():
+    global button_pressed
     player["x"], player["y"] = WORLD_W // 2 + 0.0, WORLD_H // 2 + 0.0
     player["hp"] = 100; player["attack_cooldown"]=0; player["swipe_timer"]=0
     player["dodge_timer"]=0; player["dodge_cooldown"]=0; player["invincible"]=0
@@ -895,6 +935,7 @@ def restart_full():
     enemies.clear()
     for (sx,sy) in spawn_points[:12]:
         enemies.append(create_enemy(sx, sy))
+    button_pressed = False  # Reset button on restart
 
 # ---------- NPC System (added) ----------
 # NPC images are expected in ./npcs/ (travis.png, biden.png, genesis.png)
@@ -933,6 +974,14 @@ dialog_alpha_speed = 10.0  # how fast alpha moves per frame (tweakable)
 
 # Add the show_help variable
 show_help = False
+
+# --- DO NOT PRESS Button ---
+button_pressed = False
+BUTTON_SIZE = 120
+button_x = WORLD_W // 2
+button_y = WORLD_H // 2 + 200  # Offset down so it doesn't overlap enemies
+button_rect_world = pygame.Rect(button_x - BUTTON_SIZE//2, button_y - BUTTON_SIZE//2, BUTTON_SIZE, BUTTON_SIZE)
+# ---------------------------
 
 # ---------- draw_npcs ----------
 def draw_npcs(target_surf):
@@ -998,6 +1047,54 @@ def draw_dialogue_box():
         text_surf.set_alpha(int(dialog_alpha))
         screen.blit(text_surf, (30, HEIGHT - box_h + 0))
 
+# ---------- DO NOT PRESS Button Drawing ----------
+def draw_do_not_press_button(target_surf):
+    if button_pressed:
+        return  # Don't draw if already pressed
+    
+    # Convert world coords to screen coords
+    btn_screen_x = button_x - camera_x
+    btn_screen_y = button_y - camera_y
+    
+    # Check if button is visible on screen
+    if (btn_screen_x + BUTTON_SIZE//2 < 0 or btn_screen_x - BUTTON_SIZE//2 > VIEW_W or
+        btn_screen_y + BUTTON_SIZE//2 < 0 or btn_screen_y - BUTTON_SIZE//2 > VIEW_H):
+        return
+    
+    # Draw pulsing button
+    pulse = math.sin(pygame.time.get_ticks() * 0.005) * 10 + 10
+    btn_color = (200 + int(pulse), 20, 20)
+    
+    pygame.draw.rect(target_surf, btn_color, 
+                     (int(btn_screen_x - BUTTON_SIZE//2), int(btn_screen_y - BUTTON_SIZE//2), 
+                      BUTTON_SIZE, BUTTON_SIZE), border_radius=12)
+    pygame.draw.rect(target_surf, (255, 255, 255), 
+                     (int(btn_screen_x - BUTTON_SIZE//2), int(btn_screen_y - BUTTON_SIZE//2), 
+                      BUTTON_SIZE, BUTTON_SIZE), width=3, border_radius=12)
+    
+    # Draw text
+    small_font = pygame.font.SysFont("monospace", 14, bold=True)
+    text1 = small_font.render("DO NOT", True, WHITE)
+    text2 = small_font.render("PRESS", True, WHITE)
+    text3 = small_font.render("(Press E)", True, (200, 200, 200))
+    target_surf.blit(text1, (int(btn_screen_x - text1.get_width()//2), int(btn_screen_y - 24)))
+    target_surf.blit(text2, (int(btn_screen_x - text2.get_width()//2), int(btn_screen_y - 4)))
+    target_surf.blit(text3, (int(btn_screen_x - text3.get_width()//2), int(btn_screen_y + 16)))
+
+def check_button_press_with_e():
+    global button_pressed
+    if button_pressed:
+        return
+    
+    # Check if player is close to button
+    dist = math.hypot(player["x"] - button_x, player["y"] - button_y)
+    if dist < 80:  # Within range to press
+        button_pressed = True
+        # Make all enemies HUGE
+        for e in enemies:
+            e["radius"] = e["radius"] * random.randint(5, 10)
+        print("YOU PRESSED THE BUTTON! Enemies are now HUGE!")
+
 # ---------- Help Screen Drawing ----------
 def draw_help_screen():
     overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
@@ -1049,16 +1146,19 @@ while running:
         if event.type == pygame.QUIT:
             running = False
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
+            # --- Hidden Easter Egg Key Combo ---
+            if event.mod & pygame.KMOD_CTRL and event.key == pygame.K_g:
+                show_secret = not show_secret  # Toggle visibility
+            # -----------------------------------
+            elif event.key == pygame.K_ESCAPE:
                 paused = not paused
-            elif event.key == pygame.K_r and not paused:
-                restart_full()
             elif event.key in (pygame.K_LSHIFT, pygame.K_RSHIFT):
                 if not paused and player["dodge_cooldown"] <= 0:
                     player_dodge_towards_cursor()
             elif event.key == pygame.K_e:
-                # E pressed: try to start talking to nearest NPC if close
+                # E pressed: try to start talking to nearest NPC if close, or press button
                 if not paused:
+                    check_button_press_with_e()
                     start_talking_nearest()
             elif event.key == pygame.K_h:
                 show_help = not show_help  # Toggle help screen
@@ -1069,6 +1169,13 @@ while running:
                     if button_rect.collidepoint(event.pos):
                         import webbrowser
                         webbrowser.open("https://drive.google.com/file/d/1LqB9d_72G97QB4cmkfGqXh__8SUoEffE/view?usp=sharing")
+                elif player["hp"] <= 0:
+                    # Death menu clicks
+                    if death_btn_restart_rect.collidepoint(mouse_pos):
+                        restart_full()
+                    elif death_btn_quit_rect.collidepoint(mouse_pos):
+                        pygame.quit()
+                        sys.exit()
                 elif paused:
                     if btn_restart_rect.collidepoint(mouse_pos):
                         restart_full()
@@ -1077,9 +1184,10 @@ while running:
                         pygame.quit()
                         sys.exit()
                 else:
+                    # Perform attack
                     perform_attack(mouse_pos)
 
-    if not paused:
+    if not paused and player["hp"] > 0 and not show_help:
         keys = pygame.key.get_pressed()
         handle_player_movement(keys)
         stop_talking_if_far()
@@ -1129,6 +1237,8 @@ while running:
 
     draw_world(world_surface)
     draw_afterimages(world_surface)
+    # Draw DO NOT PRESS button behind everything
+    draw_do_not_press_button(world_surface)
     draw_enemies(world_surface, dt)
     # draw NPCs into world surface so they are affected by camera/zoom
     draw_npcs(world_surface)
@@ -1147,16 +1257,26 @@ while running:
     # draw dialogue box on top of everything (handles its own fade)
     draw_dialogue_box()
 
+    # Draw pause menu if paused
+    if paused:
+        draw_pause_menu(mouse_pos)
+
     # Draw help screen if toggled
     if show_help:
         button_rect = draw_help_screen()
 
-    # If dead, overlay death message
+    # Draw death menu if dead
     if player["hp"] <= 0:
-        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA); overlay.fill((0,0,0,200))
-        screen.blit(overlay, (0,0))
-        t = FONT.render("YOU DIED — Press R to restart", True, RED)
-        screen.blit(t, (WIDTH//2 - t.get_width()//2, HEIGHT//2 - 10))
+        draw_death_menu(mouse_pos)
+
+    # --- Draw Secret Message (Easter Egg) ---
+    if show_secret:
+        y = 300
+        for line in secret_text.split("\n"):
+            text_surface = font.render(line, True, (150, 255, 180))
+            screen.blit(text_surface, (80, y))
+            y += 30
+    # ----------------------------------------
 
     pygame.display.flip()
 
